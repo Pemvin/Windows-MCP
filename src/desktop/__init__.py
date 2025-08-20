@@ -1,6 +1,7 @@
 from uiautomation import Control, GetRootControl, ControlType, GetFocusedControl, SetWindowTopmost, IsTopLevelWindow, IsZoomed, IsIconic, IsWindowVisible, ControlFromHandle
 from src.desktop.config import EXCLUDED_CLASSNAMES,BROWSER_NAMES, AVOIDED_APPS
 from src.desktop.views import DesktopState,App,Size
+from src.desktop.translations import APP_TRANSLATIONS
 from fuzzywuzzy import process
 from psutil import Process
 from src.tree import Tree
@@ -9,13 +10,33 @@ from io import BytesIO
 from PIL import Image
 import subprocess
 import pyautogui
+import logging
 import csv
 import io
 
 class Desktop:
     def __init__(self):
         self.desktop_state=None
+        self.logger = logging.getLogger('mcp_logger')
         
+    def _get_translated_app_name(self, name: str, target_lang: str) -> str:
+        """
+        Translates the application name to the target language.
+        将应用程序名称翻译成目标语言。
+
+        Args:
+            name (str): The name of the application to translate.
+            target_lang (str): The target language (e.g., 'en', 'zh').
+
+        Returns:
+            str: The translated application name.
+        """
+        name_lower = name.lower()
+        for canonical_name, translations in APP_TRANSLATIONS.items():
+            if name_lower in translations.values():
+                return translations.get(target_lang, canonical_name)
+        return name
+
     def get_state(self,use_vision:bool=False)->DesktopState:
         tree=Tree(self)
         tree_state=tree.get_state()
@@ -66,24 +87,56 @@ class Desktop:
         return mapping.get(browser.strip())
         
     def get_default_language(self)->str:
-        command="Get-Culture | Select-Object Name,DisplayName | ConvertTo-Csv -NoTypeInformation"
+        command="Get-Culture | Select-Object -ExpandProperty Name"
         response,_=self.execute_command(command)
-        reader=csv.DictReader(io.StringIO(response))
-        return "".join([row.get('DisplayName') for row in reader])
+        return response.strip()
     
     def get_apps_from_start_menu(self)->dict[str,str]:
+        """
+        Retrieves a dictionary of installed applications from the Start Menu.
+        It specifies UTF-8 encoding for the CSV conversion to handle non-ASCII characters.
+        从“开始”菜单检索已安装应用程序的字典。
+        它为CSV转换指定了UTF-8编码，以处理非ASCII字符。
+
+        Returns:
+            dict[str,str]: A dictionary mapping lowercased application names to their AppIDs.
+        """
         command='Get-StartApps | ConvertTo-Csv -NoTypeInformation'
         apps_info,_=self.execute_command(command)
         reader=csv.DictReader(io.StringIO(apps_info))
         return {row.get('Name').lower():row.get('AppID') for row in reader}
     
     def execute_command(self,command:str)->tuple[str,int]:
+        """
+        Executes a PowerShell command and returns the output and status code.
+        It ensures that the PowerShell output is UTF-8 encoded.
+        执行一个PowerShell命令并返回输出和状态码。
+        该方法确保PowerShell的输出是UTF-8编码的。
+
+        Args:
+            command (str): The PowerShell command to execute.
+
+        Returns:
+            tuple[str,int]: A tuple containing the command's stdout and return code.
+        """
         try:
-            result = subprocess.run(['powershell', '-Command']+command.split(), 
-            capture_output=True, check=True)
-            return (result.stdout.decode('latin1'),result.returncode)
+            # Prepend command to set output encoding to UTF-8
+            # 在命令前添加设置输出编码为UTF-8的指令
+            full_command = f"$OutputEncoding = [Console]::InputEncoding = [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding; {command}"
+            
+            # Execute the command. Note: we pass `full_command` as a single argument, avoiding `split()`.
+            # 执行命令。注意：我们将`full_command`作为一个单独的参数传递，避免使用`split()`。
+            result = subprocess.run(['powershell', '-Command', full_command], 
+                                    capture_output=True, 
+                                    check=True)
+            return (result.stdout.decode('utf-8', errors='ignore'), result.returncode)
         except subprocess.CalledProcessError as e:
-            return (e.stdout.decode('latin1'),e.returncode)
+            # Decode stdout from the exception object and log the error
+            # 从异常对象中解码stdout并记录错误
+            stdout = e.stdout.decode('utf-8', errors='ignore') if e.stdout else ""
+            stderr = e.stderr.decode('utf-8', errors='ignore') if e.stderr else ""
+            self.logger.error(f"Command '{command}' failed with exit code {e.returncode}. Stderr: {stderr}")
+            return (stdout, e.returncode)
         
     def is_app_browser(self,node:Control):
         process=Process(node.ProcessId)
@@ -91,7 +144,11 @@ class Desktop:
     
     def resize_app(self,name:str,size:tuple[int,int]=None,loc:tuple[int,int]=None)->tuple[str,int]:
         apps=self.get_apps()
-        matched_app:tuple[App,int]|None=process.extractOne(name,apps,score_cutoff=70)
+        
+        system_lang = self.get_default_language().split('-')[0]
+        translated_name = self._get_translated_app_name(name, system_lang)
+
+        matched_app:tuple[App,int]|None=process.extractOne(translated_name,apps,score_cutoff=70)
         if matched_app is None:
             return (f'Application {name.title()} not open.',1)
         app,_=matched_app
@@ -111,17 +168,28 @@ class Desktop:
         
     def launch_app(self,name:str)->tuple[str,int]:
         apps_map=self.get_apps_from_start_menu()
-        matched_app=process.extractOne(name,apps_map,score_cutoff=80)
+        self.logger.debug(f"Available apps in start menu: {apps_map}")
+        
+        system_lang = self.get_default_language().split('-')[0]
+        translated_name = self._get_translated_app_name(name, system_lang)
+        self.logger.debug(f"Translated app name: '{translated_name}' for system language '{system_lang}'")
 
-        # TODO: Handle the case of understanding the language of the app name
+        matched_app=process.extractOne(translated_name,apps_map.keys(),score_cutoff=80)
 
         if matched_app is None:
+            self.logger.warning(f"Application '{name}' not found in start menu with translated name '{translated_name}'.")
             return (f'Application {name.title()} not found in start menu.',1)
-        app_id,_,app_name=matched_app
-        if app_id.endswith('.exe'):
-            _,status=self.execute_command(f'Start-Process "{app_id}"')
-        else:
+        
+        app_name_in_map, _ = matched_app
+        self.logger.debug(f"Fuzzy matched app name: '{app_name_in_map}'")
+
+        app_id = apps_map[app_name_in_map]
+        self.logger.info(f"Found AppID: '{app_id}' for application '{app_name_in_map}'")
+
+        if '!' in app_id or '{' in app_id:
             _,status=self.execute_command(f'Start-Process "shell:AppsFolder\\{app_id}"')
+        else:
+            _,status=self.execute_command(f'Start-Process "{app_id}"')
         response=f'Launched {name.title()}. Wait for the app to launch...'
         return response,status
     

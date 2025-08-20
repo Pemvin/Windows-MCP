@@ -5,6 +5,7 @@ from humancursor import SystemCursor
 from platform import system, release
 from markdownify import markdownify
 from src.desktop import Desktop
+from src.logger import setup_logger
 from textwrap import dedent
 from fastmcp import FastMCP
 from typing import Literal
@@ -14,6 +15,9 @@ import pyperclip as pc
 import requests
 import asyncio
 import ctypes
+
+# Setup logger
+logger = setup_logger()
 
 pg.FAILSAFE=False
 pg.PAUSE=1.0
