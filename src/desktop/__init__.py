@@ -144,14 +144,20 @@ class Desktop:
     
     def resize_app(self,name:str,size:tuple[int,int]=None,loc:tuple[int,int]=None)->tuple[str,int]:
         apps=self.get_apps()
+        self.logger.debug(f"Available running apps: {[app.name for app in apps]}")
         
         system_lang = self.get_default_language().split('-')[0]
         translated_name = self._get_translated_app_name(name, system_lang)
+        self.logger.debug(f"Translated app name: '{translated_name}' for system language '{system_lang}'")
 
-        matched_app:tuple[App,int]|None=process.extractOne(translated_name,apps,score_cutoff=70)
+        matched_app:tuple[App,int]|None=process.extractOne(translated_name,apps,score_cutoff=60)
         if matched_app is None:
+            self.logger.warning(f"Application '{name}' not found in running applications with translated name '{translated_name}'")
             return (f'Application {name.title()} not open.',1)
+        
         app,_=matched_app
+        self.logger.info(f"Found running app: '{app.name}' with handle {app.handle}")
+        
         app_control=ControlFromHandle(app.handle)
         if loc is None:
             x=app_control.BoundingRectangle.left
@@ -161,9 +167,13 @@ class Desktop:
             width=app_control.BoundingRectangle.width()
             height=app_control.BoundingRectangle.height()
             size=(width,height)
+        
         x,y=loc
         width,height=size
+        self.logger.debug(f"Resizing app '{app.name}' to {width}x{height} at position ({x},{y})")
+        
         app_control.MoveWindow(x,y,width,height)
+        self.logger.info(f"Successfully resized app '{app.name}'")
         return (f'Application {name.title()} resized to {width}x{height} at {x},{y}.',0)
         
     def launch_app(self,name:str)->tuple[str,int]:
